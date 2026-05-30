@@ -1,0 +1,731 @@
+{
+  "name": "Email Triage Automático",
+  "nodes": [
+    {
+      "parameters": {
+        "pollTimes": {
+          "item": [
+            {
+              "mode": "everyMinute"
+            }
+          ]
+        },
+        "filters": {
+          "includeSpamTrash": false
+        }
+      },
+      "id": "node-gmail-trigger-001",
+      "name": "Gmail Trigger — Nuevo Correo",
+      "type": "n8n-nodes-base.gmailTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        0,
+        304
+      ],
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "D6jTMDyZJplUgCEq",
+          "name": "Gmail account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const email = $json;\n\n// Gmail Trigger con simple:true devuelve campos con mayúscula (From, Subject)\n// y From como string \"Nombre <email@dominio>\"\nlet sender = '';\nconst fromRaw = email.From || email.from || '';\nif (typeof fromRaw === 'string' && fromRaw) {\n  const match = fromRaw.match(/<([^>]+)>/);\n  sender = match ? match[1] : fromRaw.trim();\n} else if (fromRaw?.value?.[0]?.address) {\n  sender = fromRaw.value[0].address;\n} else if (fromRaw?.text) {\n  sender = fromRaw.text;\n}\n\nconst subject = email.Subject || email.subject || '(sin asunto)';\nconst rawDate = email.Date || email.date || null;\nconst date = rawDate ? new Date(rawDate).toISOString() : new Date().toISOString();\nconst messageId = email.id || email.messageId || '';\n\nlet bodyText = '';\nif (email.text) {\n  bodyText = email.text;\n} else if (email.html) {\n  bodyText = email.html\n    .replace(/<style[\\s\\S]*?<\\/style>/gi, '')\n    .replace(/<script[\\s\\S]*?<\\/script>/gi, '')\n    .replace(/<[^>]+>/g, ' ')\n    .replace(/&nbsp;/g, ' ')\n    .replace(/&lt;/g, '<')\n    .replace(/&gt;/g, '>')\n    .replace(/&amp;/g, '&')\n    .replace(/&quot;/g, '\"')\n    .replace(/&#39;/g, \"'\");\n} else {\n  bodyText = email.snippet || '';\n}\n\nconst bodyClean = bodyText.replace(/\\s+/g, ' ').trim().substring(0, 500);\n\nreturn [{ json: { sender, subject, date, messageId, bodyClean } }];"
+      },
+      "id": "node-clean-text-002",
+      "name": "Limpiar y Preparar Texto",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        272,
+        304
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const { sender, subject, bodyClean } = $json;\n\nconst promptContent = `Clasificá el siguiente correo electrónico y devolvé ÚNICAMENTE un JSON válido, sin texto adicional ni bloques de código markdown.\n\nFormato de respuesta exacto:\n{\"categoria\": \"soporte técnico|consulta comercial|reclamo|feedback|spam\", \"urgencia\": \"alta|media|baja\", \"resumen\": \"una oración resumiendo el correo\"}\n\nCriterios de categoría:\n- soporte técnico: problemas con productos, sistemas o servicios\n- consulta comercial: preguntas de precios, ventas, contratación\n- reclamo: disconformidad, queja, pedido de compensación\n- feedback: sugerencias, comentarios positivos o neutros\n- spam: publicidad no solicitada, phishing, contenido irrelevante\n\nCriterios de urgencia:\n- alta: cliente bloqueado, pérdida económica, falla crítica, plazo inminente\n- media: problema funcional, consulta que requiere respuesta en el día\n- baja: consulta general, sugerencia, información sin urgencia\n\nCorreo a clasificar:\nAsunto: ${subject}\nDe: ${sender}\nCuerpo: ${bodyClean}`;\n\nconst requestBody = {\n  model: 'claude-sonnet-4-20250514',\n  max_tokens: 200,\n  temperature: 0,\n  messages: [{ role: 'user', content: promptContent }]\n};\n\nreturn [{ json: { ...$json, requestBody: JSON.stringify(requestBody) } }];"
+      },
+      "id": "node-build-prompt-003",
+      "name": "Construir Prompt de Clasificación",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        528,
+        304
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.anthropic.com/v1/messages",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "anthropicApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "anthropic-version",
+              "value": "2023-06-01"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ $json.requestBody }}",
+        "options": {
+          "response": {
+            "response": {}
+          }
+        }
+      },
+      "id": "node-claude-classify-004",
+      "name": "Clasificar con Claude",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        784,
+        304
+      ],
+      "credentials": {
+        "anthropicApi": {
+          "id": "3x6FIqX5I9ZL7Eky",
+          "name": "Anthropic account"
+        }
+      },
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "jsCode": "const prevData = $('Limpiar y Preparar Texto').first().json;\n\n// Decodificar Buffer si la respuesta llegó como stream binario\nlet responseJson = $json;\nif (responseJson._readableState?.buffer || responseJson.type === 'Buffer') {\n  try {\n    let bytes = [];\n    if (responseJson._readableState?.buffer) {\n      for (const chunk of responseJson._readableState.buffer) {\n        if (chunk?.data) bytes = bytes.concat(Array.from(chunk.data));\n      }\n    } else if (responseJson.data) {\n      bytes = Array.from(responseJson.data);\n    }\n    if (bytes.length > 0) {\n      responseJson = JSON.parse(Buffer.from(bytes).toString('utf8'));\n    }\n  } catch(bufErr) { /* continuar con objeto original */ }\n}\n\nlet classification;\ntry {\n  const content = responseJson.content;\n  const rawText = Array.isArray(content) ? content[0].text : String(content || '');\n  const cleaned = rawText.replace(/```json\\n?/g, '').replace(/```\\n?/g, '').trim();\n  classification = JSON.parse(cleaned);\n  if (!classification.categoria || !classification.urgencia || !classification.resumen) {\n    throw new Error('Campos faltantes');\n  }\n} catch(e) {\n  classification = {\n    categoria: 'consulta comercial',\n    urgencia: 'baja',\n    resumen: 'No se pudo clasificar automáticamente. Requiere revisión manual.'\n  };\n}\n\nreturn [{\n  json: {\n    sender: prevData.sender,\n    subject: prevData.subject,\n    date: prevData.date,\n    messageId: prevData.messageId,\n    bodyClean: prevData.bodyClean,\n    category: classification.categoria,\n    urgency: classification.urgencia,\n    summary: classification.resumen\n  }\n}];"
+      },
+      "id": "node-parse-classification-005",
+      "name": "Parsear Clasificación",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1040,
+        304
+      ]
+    },
+    {
+      "parameters": {
+        "authentication": "airtableOAuth2Api",
+        "operation": "create",
+        "base": {
+          "__rl": true,
+          "mode": "url",
+          "value": "https://airtable.com/appi02AkuB6jca4ul/tblLGvZsHQvm9B22R/viwUFVSV8cojdXPFg?blocks=hide",
+          "__regex": "https://airtable.com/([a-zA-Z0-9]{2,})"
+        },
+        "table": {
+          "__rl": true,
+          "value": "tblLGvZsHQvm9B22R",
+          "mode": "list",
+          "cachedResultName": "Tickets",
+          "cachedResultUrl": "https://airtable.com/appi02AkuB6jca4ul/tblLGvZsHQvm9B22R"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {},
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "Asunto",
+              "displayName": "Asunto",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Remitente",
+              "displayName": "Remitente",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Fecha",
+              "displayName": "Fecha",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "dateTime",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Categoría",
+              "displayName": "Categoría",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "options",
+              "options": [
+                {
+                  "name": "soporte técnico",
+                  "value": "soporte técnico"
+                },
+                {
+                  "name": "consulta comercial",
+                  "value": "consulta comercial"
+                },
+                {
+                  "name": "reclamo",
+                  "value": "reclamo"
+                },
+                {
+                  "name": "feedback",
+                  "value": "feedback"
+                },
+                {
+                  "name": "spam",
+                  "value": "spam"
+                },
+                {
+                  "name": "Soporte Técnico",
+                  "value": "Soporte Técnico"
+                },
+                {
+                  "name": "Facturación",
+                  "value": "Facturación"
+                },
+                {
+                  "name": "Infraestructura",
+                  "value": "Infraestructura"
+                },
+                {
+                  "name": "Administrativo",
+                  "value": "Administrativo"
+                },
+                {
+                  "name": "Recursos Humanos",
+                  "value": "Recursos Humanos"
+                }
+              ],
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Urgencia",
+              "displayName": "Urgencia",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "options",
+              "options": [
+                {
+                  "name": "alta",
+                  "value": "alta"
+                },
+                {
+                  "name": "media",
+                  "value": "media"
+                },
+                {
+                  "name": "baja",
+                  "value": "baja"
+                },
+                {
+                  "name": "Alta",
+                  "value": "Alta"
+                },
+                {
+                  "name": "Media",
+                  "value": "Media"
+                },
+                {
+                  "name": "Baja",
+                  "value": "Baja"
+                }
+              ],
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Resumen",
+              "displayName": "Resumen",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Estado",
+              "displayName": "Estado",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "options",
+              "options": [
+                {
+                  "name": "Pendiente",
+                  "value": "Pendiente"
+                },
+                {
+                  "name": "En proceso",
+                  "value": "En proceso"
+                },
+                {
+                  "name": "Cerrado",
+                  "value": "Cerrado"
+                },
+                {
+                  "name": "Abierto",
+                  "value": "Abierto"
+                },
+                {
+                  "name": "En Proceso",
+                  "value": "En Proceso"
+                }
+              ],
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Extracto",
+              "displayName": "Extracto",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Historial de Cambios de Estado",
+              "displayName": "Historial de Cambios de Estado",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Fecha de Resolución",
+              "displayName": "Fecha de Resolución",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "dateTime",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Tiempo hasta Resolución (horas)",
+              "displayName": "Tiempo hasta Resolución (horas)",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "number",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Análisis de Tendencia (AI)",
+              "displayName": "Análisis de Tendencia (AI)",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Categoría Sugerida (AI)",
+              "displayName": "Categoría Sugerida (AI)",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "options",
+              "options": [
+                {
+                  "name": "soporte técnico",
+                  "value": "soporte técnico"
+                },
+                {
+                  "name": "consulta comercial",
+                  "value": "consulta comercial"
+                },
+                {
+                  "name": "reclamo",
+                  "value": "reclamo"
+                },
+                {
+                  "name": "feedback",
+                  "value": "feedback"
+                },
+                {
+                  "name": "spam",
+                  "value": "spam"
+                },
+                {
+                  "name": "Soporte Técnico",
+                  "value": "Soporte Técnico"
+                },
+                {
+                  "name": "Facturación",
+                  "value": "Facturación"
+                },
+                {
+                  "name": "Infraestructura",
+                  "value": "Infraestructura"
+                },
+                {
+                  "name": "Administrativo",
+                  "value": "Administrativo"
+                },
+                {
+                  "name": "Recursos Humanos",
+                  "value": "Recursos Humanos"
+                }
+              ],
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Urgencia Sugerida (AI)",
+              "displayName": "Urgencia Sugerida (AI)",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "options",
+              "options": [
+                {
+                  "name": "alta",
+                  "value": "alta"
+                },
+                {
+                  "name": "media",
+                  "value": "media"
+                },
+                {
+                  "name": "baja",
+                  "value": "baja"
+                },
+                {
+                  "name": "Alta",
+                  "value": "Alta"
+                },
+                {
+                  "name": "Media",
+                  "value": "Media"
+                },
+                {
+                  "name": "Baja",
+                  "value": "Baja"
+                }
+              ],
+              "readOnly": false,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "id": "node-airtable-save-006",
+      "name": "Guardar en Airtable",
+      "type": "n8n-nodes-base.airtable",
+      "typeVersion": 2.1,
+      "position": [
+        1312,
+        304
+      ],
+      "credentials": {
+        "airtableOAuth2Api": {
+          "id": "zzcjXbX2VJDksZwJ",
+          "name": "Airtable Personal Access Token account 2"
+        }
+      },
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "jsCode": "const emailData = $('Parsear Clasificación').first().json;\nconst { category, urgency } = emailData;\n\nconst escalate = (category === 'soporte técnico' || category === 'reclamo') && urgency === 'alta';\nconst isSpam = category === 'spam';\n\nreturn [{\n  json: {\n    ...emailData,\n    airtableRecordId: $json.id || '',\n    escalate,\n    isSpam\n  }\n}];"
+      },
+      "id": "node-eval-routing-007",
+      "name": "Evaluar Enrutamiento",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1568,
+        304
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "cond-escalate",
+              "leftValue": "={{ $json.escalate }}",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "node-if-escalate-008",
+      "name": "IF Escalación Urgente",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1824,
+        304
+      ]
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "value": "#soporte-urgente",
+          "mode": "name"
+        },
+        "text": "={{ '🚨 *Urgencia Alta — ' + $json.category.toUpperCase() + '*\\n\\n*De:* ' + $json.sender + '\\n*Asunto:* ' + $json.subject + '\\n*Urgencia:* 🔴 ' + $json.urgency + '\\n*Resumen:* ' + $json.summary + '\\n*Fecha:* ' + $json.date + '\\n\\n_Gestionar con prioridad en Airtable._' }}",
+        "otherOptions": {}
+      },
+      "id": "node-slack-alert-009",
+      "name": "Notificar Slack — Escalación",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [
+        2080,
+        112
+      ],
+      "webhookId": "21b658f8-c899-4b30-a0ad-847de0019096",
+      "credentials": {
+        "slackApi": {
+          "id": "P3iqyEnYbigdRi0T",
+          "name": "Slack account"
+        }
+      },
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "cond-spam",
+              "leftValue": "={{ $json.isSpam }}",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "node-if-spam-010",
+      "name": "IF Es Spam",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        2080,
+        512
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "addLabels",
+        "messageId": "={{ $json.messageId }}",
+        "labelIds": [
+          "SPAM"
+        ]
+      },
+      "id": "node-gmail-archive-011",
+      "name": "Archivar Correo en Gmail",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        2352,
+        624
+      ],
+      "webhookId": "b5ce7c83-0c0a-4cc3-b42f-3cfc636097d2",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "D6jTMDyZJplUgCEq",
+          "name": "Gmail account"
+        }
+      },
+      "continueOnFail": true
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Gmail Trigger — Nuevo Correo": {
+      "main": [
+        [
+          {
+            "node": "Limpiar y Preparar Texto",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Limpiar y Preparar Texto": {
+      "main": [
+        [
+          {
+            "node": "Construir Prompt de Clasificación",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Construir Prompt de Clasificación": {
+      "main": [
+        [
+          {
+            "node": "Clasificar con Claude",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Clasificar con Claude": {
+      "main": [
+        [
+          {
+            "node": "Parsear Clasificación",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parsear Clasificación": {
+      "main": [
+        [
+          {
+            "node": "Guardar en Airtable",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Guardar en Airtable": {
+      "main": [
+        [
+          {
+            "node": "Evaluar Enrutamiento",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Evaluar Enrutamiento": {
+      "main": [
+        [
+          {
+            "node": "IF Escalación Urgente",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF Escalación Urgente": {
+      "main": [
+        [
+          {
+            "node": "Notificar Slack — Escalación",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "IF Es Spam",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF Es Spam": {
+      "main": [
+        [
+          {
+            "node": "Archivar Correo en Gmail",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "America/Argentina/Buenos_Aires",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "all",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "availableInMCP": false
+  },
+  "versionId": "76a93c41-a352-4d11-9f66-72cb388244e4",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "38ee23dda673260744c1d583e276366dc7fe027add2b91549715a7f87ae733f9"
+  },
+  "id": "VjNPPqOAhr4F0GI2",
+  "tags": []
+}
